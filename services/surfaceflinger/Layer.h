@@ -1011,6 +1011,8 @@ public:
      */
     virtual bool needsInputInfo() const { return hasInputInfo(); }
 
+    void clearNotifiedFrameNumber();
+
 protected:
     compositionengine::OutputLayer* findOutputLayerForDisplay(const DisplayDevice*) const;
 
@@ -1083,6 +1085,8 @@ protected:
 
     // Window types from WindowManager.LayoutParams
     const int mWindowType;
+
+    uint64_t mAvailableFrameNumber;
 
 private:
     virtual void setTransformHint(ui::Transform::RotationFlags) {}
