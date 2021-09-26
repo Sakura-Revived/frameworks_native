@@ -84,11 +84,13 @@
 
 using namespace android::surfaceflinger;
 
+#ifdef DISPLAY_USE_SMOOTH_MOTION
 namespace smomo {
 class SmomoIntf;
 } // namespace smomo
 
 using smomo::SmomoIntf;
+#endif
 
 namespace android {
 
@@ -178,6 +180,7 @@ public:
     int32_t mComposerSequenceId = 0;
 };
 
+#ifdef DISPLAY_USE_SMOOTH_MOTION
 class SmomoWrapper {
 public:
     SmomoWrapper() {}
@@ -200,6 +203,7 @@ private:
     CreateSmoMoFuncPtr mSmoMoCreateFunc;
     DestroySmoMoFuncPtr mSmoMoDestroyFunc;
 };
+#endif
 
 class SurfaceFlinger : public BnSurfaceComposer,
                        public PriorityDumper,
@@ -1332,7 +1336,9 @@ private:
 
     void clearCurrentStateLayerNotifiedFrameNumber();
 
+#ifdef DISPLAY_USE_SMOOTH_MOTION
     SmomoWrapper mSmoMo;
+#endif
 };
 
 } // namespace android

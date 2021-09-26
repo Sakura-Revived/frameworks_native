@@ -127,8 +127,10 @@
 #include "android-base/parseint.h"
 #include "android-base/stringprintf.h"
 
-#ifdef QCOM_UM_FAMILY
+#ifdef DISPLAY_USE_SMOOTH_MOTION
 #include "smomo_interface.h"
+#endif
+#ifdef QCOM_UM_FAMILY
 #if __has_include("QtiGralloc.h")
 #include "QtiGralloc.h"
 #else
@@ -319,7 +321,7 @@ std::string decodeDisplayColorSetting(DisplayColorSetting displayColorSetting) {
 
 SurfaceFlingerBE::SurfaceFlingerBE() : mHwcServiceName(getHwcServiceName()) {}
 
-#ifdef QCOM_UM_FAMILY
+#ifdef DISPLAY_USE_SMOOTH_MOTION
 bool SmomoWrapper::init() {
     mSmoMoLibHandle = dlopen(SMOMO_LIBRARY_NAME, RTLD_NOW);
     if (!mSmoMoLibHandle) {
@@ -799,7 +801,7 @@ void SurfaceFlinger::init() {
         ALOGE("Run StartPropertySetThread failed!");
     }
 
-#ifdef QCOM_UM_FAMILY
+#ifdef DISPLAY_USE_SMOOTH_MOTION
     char smomoProp[PROPERTY_VALUE_MAX];
     property_get("vendor.display.use_smooth_motion", smomoProp, "0");
     if (atoi(smomoProp) && mSmoMo.init()) {
@@ -2463,7 +2465,7 @@ void SurfaceFlinger::postComposition()
         mRegionSamplingThread->notifyNewContent();
     }
 
-#ifdef QCOM_UM_FAMILY
+#ifdef DISPLAY_USE_SMOOTH_MOTION
     if (mSmoMo) {
         ATRACE_NAME("SmoMoUpdateState");
         Mutex::Autolock lock(mStateLock);

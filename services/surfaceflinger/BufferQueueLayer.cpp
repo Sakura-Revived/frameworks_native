@@ -35,7 +35,7 @@
 #include "Scheduler/LayerHistory.h"
 #include "TimeStats/TimeStats.h"
 
-#ifdef QCOM_UM_FAMILY
+#ifdef DISPLAY_USE_SMOOTH_MOTION
 #include "smomo_interface.h"
 #endif
 
@@ -129,7 +129,7 @@ bool BufferQueueLayer::shouldPresentNow(nsecs_t expectedPresentTime) const {
 
     bool isDue = addedTime < expectedPresentTime;
 
-#ifdef QCOM_UM_FAMILY
+#ifdef DISPLAY_USE_SMOOTH_MOTION
     if (isDue && mFlinger->mSmoMo) {
         smomo::SmomoBufferStats bufferStats;
         bufferStats.id = getSequence();
@@ -461,7 +461,7 @@ void BufferQueueLayer::onFrameAvailable(const BufferItem& item) {
     mFlinger->mInterceptor->saveBufferUpdate(layerId, item.mGraphicBuffer->getWidth(),
                                              item.mGraphicBuffer->getHeight(), item.mFrameNumber);
 
-#ifdef QCOM_UM_FAMILY
+#ifdef DISPLAY_USE_SMOOTH_MOTION
     if (mFlinger->mSmoMo) {
         smomo::SmomoBufferStats bufferStats;
         bufferStats.id = getSequence();
