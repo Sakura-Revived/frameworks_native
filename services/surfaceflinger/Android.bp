@@ -17,6 +17,7 @@ cc_defaults {
         "disable_postrender_cleanup_defaults",
         "surfaceflinger_defaults",
         "surfaceflinger_qcom_ext_defaults",
+        "display_use_smooth_motion_defaults",
     ],
     cflags: [
         "-DLOG_TAG=\"SurfaceFlinger\"",

@@ -127,6 +127,9 @@
 #include "android-base/parseint.h"
 #include "android-base/stringprintf.h"
 
+#ifdef DISPLAY_USE_SMOOTH_MOTION
+#include "smomo_interface.h"
+#endif
 #ifdef QCOM_UM_FAMILY
 #if __has_include("QtiGralloc.h")
 #include "QtiGralloc.h"
@@ -317,6 +320,47 @@ std::string decodeDisplayColorSetting(DisplayColorSetting displayColorSetting) {
 }
 
 SurfaceFlingerBE::SurfaceFlingerBE() : mHwcServiceName(getHwcServiceName()) {}
+
+#ifdef DISPLAY_USE_SMOOTH_MOTION
+bool SmomoWrapper::init() {
+    mSmoMoLibHandle = dlopen(SMOMO_LIBRARY_NAME, RTLD_NOW);
+    if (!mSmoMoLibHandle) {
+        ALOGE("Unable to open SmoMo lib: %s", dlerror());
+        return false;
+    }
+
+    mSmoMoCreateFunc =
+        reinterpret_cast<CreateSmoMoFuncPtr>(dlsym(mSmoMoLibHandle,
+            CREATE_SMOMO_INTERFACE_NAME));
+    mSmoMoDestroyFunc =
+        reinterpret_cast<DestroySmoMoFuncPtr>(dlsym(mSmoMoLibHandle,
+            DESTROY_SMOMO_INTERFACE_NAME));
+
+    if (!mSmoMoCreateFunc || !mSmoMoDestroyFunc) {
+        ALOGE("Can't load SmoMo symbols: %s", dlerror());
+        dlclose(mSmoMoLibHandle);
+        return false;
+    }
+
+    if (!mSmoMoCreateFunc(SMOMO_VERSION_TAG, &mInst)) {
+        ALOGE("Unable to create SmoMo interface");
+        dlclose(mSmoMoLibHandle);
+        return false;
+    }
+
+    return true;
+}
+
+SmomoWrapper::~SmomoWrapper() {
+    if (mInst) {
+        mSmoMoDestroyFunc(mInst);
+    }
+
+    if (mSmoMoLibHandle) {
+      dlclose(mSmoMoLibHandle);
+    }
+}
+#endif
 
 SurfaceFlinger::SurfaceFlinger(Factory& factory, SkipInitializationTag)
       : mFactory(factory),
@@ -756,6 +800,29 @@ void SurfaceFlinger::init() {
     if (mStartPropertySetThread->Start() != NO_ERROR) {
         ALOGE("Run StartPropertySetThread failed!");
     }
+
+#ifdef DISPLAY_USE_SMOOTH_MOTION
+    char smomoProp[PROPERTY_VALUE_MAX];
+    property_get("vendor.display.use_smooth_motion", smomoProp, "0");
+    if (atoi(smomoProp) && mSmoMo.init()) {
+        mSmoMo->SetChangeRefreshRateCallback(
+            [this](int32_t refreshRate) {
+                setRefreshRateTo(refreshRate);
+            });
+
+        std::vector<float> refreshRates;
+        auto iter = mRefreshRateConfigs->getAllRefreshRates().cbegin();
+        while (iter != mRefreshRateConfigs->getAllRefreshRates().cend()) {
+            if (iter->second->getFps() > 0) {
+                refreshRates.push_back(iter->second->getFps());
+            }
+            ++iter;
+        }
+        mSmoMo->SetDisplayRefreshRates(refreshRates);
+
+        ALOGI("SmoMo is enabled");
+    }
+#endif
 
     ALOGV("Done initializing");
 }
@@ -1641,6 +1708,22 @@ void SurfaceFlinger::changeRefreshRateLocked(const RefreshRate& refreshRate,
     setDesiredActiveConfig({refreshRate.getConfigId(), event});
 }
 
+void SurfaceFlinger::setRefreshRateTo(int32_t refreshRate) {
+    auto& currentRefreshRate = mRefreshRateConfigs->getCurrentRefreshRate();
+
+    auto iter = mRefreshRateConfigs->getAllRefreshRates().cbegin();
+    while (iter != mRefreshRateConfigs->getAllRefreshRates().cend()) {
+        if (iter->second->inPolicy(refreshRate, refreshRate)) {
+            break;
+        }
+        ++iter;
+    }
+
+    if (currentRefreshRate != *iter->second) {
+        changeRefreshRate(*iter->second, Scheduler::ConfigEvent::Changed);
+    }
+}
+
 void SurfaceFlinger::onHotplugReceived(int32_t sequenceId, hal::HWDisplayId hwcDisplayId,
                                        hal::Connection connection) {
     ALOGV("%s(%d, %" PRIu64 ", %s)", __FUNCTION__, sequenceId, hwcDisplayId,
@@ -1993,6 +2076,7 @@ void SurfaceFlinger::onMessageInvalidate(nsecs_t expectedVSyncTime) {
 
         refreshNeeded = handleMessageTransaction();
         refreshNeeded |= handleMessageInvalidate();
+        clearCurrentStateLayerNotifiedFrameNumber();
         if (mTracingEnabled) {
             mAddCompositionStateToTrace =
                     mTracing.flagIsSetLocked(SurfaceTracing::TRACE_COMPOSITION);
@@ -2380,6 +2464,30 @@ void SurfaceFlinger::postComposition()
     if (mLumaSampling && mRegionSamplingThread) {
         mRegionSamplingThread->notifyNewContent();
     }
+
+#ifdef DISPLAY_USE_SMOOTH_MOTION
+    if (mSmoMo) {
+        ATRACE_NAME("SmoMoUpdateState");
+        Mutex::Autolock lock(mStateLock);
+
+        uint32_t fps = 0;
+        std::vector<smomo::SmomoLayerStats> layers;
+
+        // Disable SmoMo by passing empty layer stack in multiple display case
+        if (mDisplays.size() == 1) {
+            for (auto& layer : mLayersWithQueuedFrames) {
+                smomo::SmomoLayerStats layerStats;
+                layerStats.id = layer->getSequence();
+                layerStats.name = layer->getName();
+                layers.push_back(layerStats);
+            }
+
+            fps = mRefreshRateConfigs->getCurrentRefreshRate().getFps();
+        }
+
+        mSmoMo->UpdateSmomoState(layers, fps);
+    }
+#endif
 
     // Even though ATRACE_INT64 already checks if tracing is enabled, it doesn't prevent the
     // side-effect of getTotalSize(), so we check that again here
@@ -3065,6 +3173,7 @@ void SurfaceFlinger::commitTransactionLocked() {
             // Ensure any buffers set to display on any children are released.
             if (l->isRemovedFromCurrentState()) {
                 l->latchAndReleaseBuffer();
+                l->clearNotifiedFrameNumber();
             }
 
             // If the layer has been removed and has no parent, then it will not be reachable
@@ -3401,10 +3510,6 @@ void SurfaceFlinger::setTransactionState(
     }
 
     const bool pendingTransactions = itr != mTransactionQueues.end();
-    // Expected present time is computed and cached on invalidate, so it may be stale.
-    if (!pendingTransactions) {
-        mExpectedPresentTime = calculateExpectedPresentTime(systemTime());
-    }
 
     if (pendingTransactions || !transactionIsReadyToBeApplied(desiredPresentTime, states)) {
         mTransactionQueues[applyToken].emplace(states, displays, flags, desiredPresentTime,
@@ -5787,7 +5892,7 @@ status_t SurfaceFlinger::captureScreenCommon(RenderArea& renderArea,
 
     // TODO(b/116112787) Make buffer usage a parameter.
     const uint32_t usage = GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN |
-            GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE;
+            GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_COMPOSER;
     *outBuffer =
             getFactory().createGraphicBuffer(renderArea.getReqWidth(), renderArea.getReqHeight(),
                                              static_cast<android_pixel_format>(reqPixelFormat), 1,
@@ -6398,6 +6503,13 @@ void SurfaceFlinger::enableRefreshRateOverlay(bool enable) {
             mRefreshRateOverlay->changeRefreshRate(mRefreshRateConfigs->getCurrentRefreshRate());
         }
     }));
+}
+
+void SurfaceFlinger::clearCurrentStateLayerNotifiedFrameNumber() {
+    Mutex::Autolock _l(mStateLock);
+    mCurrentState.traverseInZOrder([](Layer* layer) {
+        layer->clearNotifiedFrameNumber();
+    });
 }
 
 } // namespace android

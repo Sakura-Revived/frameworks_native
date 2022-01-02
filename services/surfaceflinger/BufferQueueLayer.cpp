@@ -35,6 +35,10 @@
 #include "Scheduler/LayerHistory.h"
 #include "TimeStats/TimeStats.h"
 
+#ifdef DISPLAY_USE_SMOOTH_MOTION
+#include "smomo_interface.h"
+#endif
+
 namespace android {
 
 BufferQueueLayer::BufferQueueLayer(const LayerCreationArgs& args) : BufferLayer(args) {}
@@ -123,7 +127,19 @@ bool BufferQueueLayer::shouldPresentNow(nsecs_t expectedPresentTime) const {
         mFlinger->mTimeStats->incrementBadDesiredPresent(getSequence());
     }
 
-    const bool isDue = addedTime < expectedPresentTime;
+    bool isDue = addedTime < expectedPresentTime;
+
+#ifdef DISPLAY_USE_SMOOTH_MOTION
+    if (isDue && mFlinger->mSmoMo) {
+        smomo::SmomoBufferStats bufferStats;
+        bufferStats.id = getSequence();
+        bufferStats.queued_frames = getQueuedFrameCount();
+        bufferStats.auto_timestamp = mQueueItems[0].mIsAutoTimestamp;
+        bufferStats.timestamp = mQueueItems[0].mTimestamp;
+        bufferStats.dequeue_latency = 0;
+        isDue = mFlinger->mSmoMo->ShouldPresentNow(bufferStats, expectedPresentTime);
+    }
+#endif
     return isDue || !isPlausible;
 }
 
@@ -177,10 +193,17 @@ uint64_t BufferQueueLayer::getFrameNumber(nsecs_t expectedPresentTime) const {
     }
 
     for (int i = 1; i < mQueueItems.size(); i++) {
+        if (mAvailableFrameNumber != 0 &&
+            mQueueItems[i].mFrameNumber > mAvailableFrameNumber) {
+            break;
+        }
+
         const bool fenceSignaled =
                 mQueueItems[i].mFenceTime->getSignalTime() != Fence::SIGNAL_TIME_PENDING;
-        if (!fenceSignaled) {
-            break;
+        if (!latchUnsignaledBuffers()) {
+            if (!fenceSignaled) {
+                break;
+            }
         }
 
         // We don't drop frames without explicit timestamps
@@ -258,10 +281,16 @@ status_t BufferQueueLayer::updateTexImage(bool& recomputeVisibleRegions, nsecs_t
     {
         Mutex::Autolock lock(mQueueItemLock);
         for (int i = 0; i < mQueueItems.size(); i++) {
+            if (mAvailableFrameNumber != 0 &&
+                mQueueItems[i].mFrameNumber > mAvailableFrameNumber) {
+                break;
+            }
             bool fenceSignaled =
                     mQueueItems[i].mFenceTime->getSignalTime() != Fence::SIGNAL_TIME_PENDING;
-            if (!fenceSignaled) {
-                break;
+            if (!latchUnsignaledBuffers()) {
+                if (!fenceSignaled) {
+                    break;
+                }
             }
             lastSignaledFrameNumber = mQueueItems[i].mFrameNumber;
         }
@@ -431,6 +460,18 @@ void BufferQueueLayer::onFrameAvailable(const BufferItem& item) {
 
     mFlinger->mInterceptor->saveBufferUpdate(layerId, item.mGraphicBuffer->getWidth(),
                                              item.mGraphicBuffer->getHeight(), item.mFrameNumber);
+
+#ifdef DISPLAY_USE_SMOOTH_MOTION
+    if (mFlinger->mSmoMo) {
+        smomo::SmomoBufferStats bufferStats;
+        bufferStats.id = getSequence();
+        bufferStats.queued_frames = getQueuedFrameCount();
+        bufferStats.auto_timestamp = item.mIsAutoTimestamp;
+        bufferStats.timestamp = item.mTimestamp;
+        bufferStats.dequeue_latency = 0;
+        mFlinger->mSmoMo->CollectLayerStats(bufferStats);
+    }
+#endif
 
     mFlinger->signalLayerUpdate();
     mConsumer->onBufferAvailable(item);
